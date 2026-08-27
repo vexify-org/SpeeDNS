@@ -1,0 +1,42 @@
+[package]
+name = "speedns"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+license = "Apache-2.0"
+description = "SpeeDNS — ultra-lightweight, AI-native (MCP) private DNS server. Pure Rust, zero dependencies."
+homepage = "https://github.com/speedns/speedns"
+repository = "https://github.com/speedns/speedns"
+keywords = ["dns", "mcp", "resolver", "dns-server", "ai-native", "zero-dependency"]
+categories = ["network-programming", "command-line-utilities"]
+readme = "README.md"
+exclude = ["examples/*"]
+
+[lib]
+name = "speedns"
+path = "src/lib.rs"
+
+[[bin]]
+name = "speednsd"
+path = "src/bin/speednsd.rs"
+
+[[bin]]
+name = "speedns-mcp"
+path = "src/bin/speedns-mcp.rs"
+
+[[bin]]
+name = "speedns"
+path = "src/bin/speedns.rs"
+
+[dependencies]
+# Intentionally empty. SpeeDNS is 100% std-only by design.
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.dev]
+opt-level = 1
