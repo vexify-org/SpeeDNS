@@ -1,0 +1,7 @@
+/target
+*.swp
+*.swo
+*~
+speedns.conf
+records.conf
+*.sock
