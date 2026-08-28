@@ -1,0 +1,38 @@
+# SpeeDNS example configuration
+# Copy to speedns.conf and adjust, or pass with: speednsd -c speedns.conf
+
+# UDP listen address (TCP is served on the same port when tcp = true).
+listen = "127.0.0.1:53"
+
+# Serve TCP in addition to UDP.
+tcp = true
+
+# Upstream resolver for names outside the local store.
+# Set to "none" for pure authoritative mode (unknown names are REFUSED).
+upstream = "1.1.1.1:53"
+
+# Authoritative records file (see examples/records.conf for the format).
+records = "records.conf"
+
+# Optional /etc/hosts-style file to import (A/AAAA + auto reverse PTR).
+# hosts = "/etc/hosts"
+
+# Maximum number of cached responses before LRU eviction.
+cache_size = 2048
+
+# Default TTL (seconds) for records without an explicit one.
+default_ttl = 300
+
+# Upstream timeout in milliseconds.
+timeout_ms = 1500
+
+# Unix control socket for the CLI and MCP bridge. Set to "none" to disable.
+control_socket = "/tmp/speedns.sock"
+
+# Web dashboard listen address. Set to "none" to disable.
+# NOTE: binds 0.0.0.0:80 by default — needs root, and exposes the dashboard
+# (status / records / add / remove) to anyone who can reach it.
+web = "0.0.0.0:80"
+
+# Log verbosity: quiet | info | verbose
+log_level = "info"
