@@ -32,7 +32,7 @@ path = "src/bin/speedns.rs"
 # Intentionally empty. SpeeDNS is 100% std-only by design.
 
 [profile.release]
-opt-level = 3
+opt-level = "z"
 lto = true
 codegen-units = 1
 strip = true
