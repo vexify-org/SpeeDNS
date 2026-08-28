@@ -216,6 +216,47 @@ _sip._tcp.speedns.local.  300 SRV 10 60 5060 sip.speedns.local.
 The `/etc/hosts` importer turns every `address name` line into an A/AAAA record
 **and** the matching reverse-PTR record automatically.
 
+## 🏛️ Authoritative DNS
+
+Run SpeeDNS as a real authoritative server for your own zones — the same wire
+protocol that `dig` and every resolver expects. Start with `--no-upstream`
+(or `upstream = "none"`), load your zone, and it answers with correct
+authoritative semantics:
+
+- **`AA` flag** on every answer from your zone — resolvers treat it as the
+  source of truth.
+- **`RA` flag** cleared in authoritative-only mode — this is a master server,
+  not a recursive resolver.
+- **NXDOMAIN** for missing names *inside* your zone, with the **SOA** attached
+  in the AUTHORITY section, so downstream negative caching works.
+- **NODATA** for existing names that have no records of the requested type.
+- **REFUSED** for anything *outside* your zones — nothing leaks upstream.
+- **EDNS0** respected: responses honor the client's advertised UDP payload size
+  (default 1232). Oversized answers are **truncated with the `TC` bit**, and the
+  client falls back to **TCP**, where the full answer is served.
+- **Record types**: A, AAAA, CNAME, MX, NS, PTR, SOA, SRV, TXT.
+
+Example — serve `vexify.io` authoritatively:
+
+```bash
+# records.conf
+vexify.io.    300 SOA  ns1.vexify.io. admin.vexify.io. 2026082801 3600 600 604800 300
+vexify.io.    300 NS   ns1.vexify.io.
+ns1.vexify.io. 300 A   127.0.0.1
+vexify.io.    300 A    192.0.2.1
+www.vexify.io. 300 A    192.0.2.10
+mail.vexify.io. 300 MX  10 mail.vexify.io.
+alias.vexify.io. 300 CNAME www.vexify.io.
+
+# serve it
+./target/release/speednsd --listen 127.0.0.1:53 --no-upstream --records records.conf
+
+# verify it like any authority
+dig @127.0.0.1 vexify.io A        # flags: qr aa rd;  answer 192.0.2.1
+dig @127.0.0.1 nope.vexify.io A   # status: NXDOMAIN; SOA in AUTHORITY section
+dig @127.0.0.1 example.org A      # status: REFUSED (outside your zone)
+```
+
 ## CLI reference
 
 ```text
@@ -231,10 +272,12 @@ speedns cache                                     snapshot cached entries
 
 ## What it is not
 
-SpeeDNS is **not** a full DNSSEC-signing, multi-zone, anycast-grade DNS
-appliance. It is the sharp, tiny tool for the 99% case: a private, AI-operated
-resolver for your laptop, LAN, homelab, or dev environment. It wants to be
-understood in an afternoon and trusted for years.
+SpeeDNS **is** a real authoritative server for the zones you load into it
+(proper `AA`/NXDOMAIN/SOA semantics, EDNS0, TCP fallback). What it is **not** is
+a full DNSSEC-signing, multi-zone, anycast-grade appliance. It is the sharp,
+tiny tool for the 99% case: a private, AI-operated resolver — and, when you
+want, authoritative server — for your laptop, LAN, homelab, or dev environment.
+It wants to be understood in an afternoon and trusted for years.
 
 ## Roadmap
 

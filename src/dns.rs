@@ -21,6 +21,9 @@ pub const TYPE_ANY: u16 = 255;
 /// Internet class.
 pub const CLASS_IN: u16 = 1;
 
+/// UDP payload size SpeeDNS advertises in its EDNS0 OPT record.
+pub const EDNS_UDP_SIZE: u16 = 1232;
+
 /// Response codes.
 pub const RCODE_NOERROR: u16 = 0;
 pub const RCODE_FORMERR: u16 = 1;
@@ -201,6 +204,17 @@ pub struct Message {
     pub answers: Vec<Record>,
     pub authorities: Vec<Record>,
     pub additionals: Vec<Record>,
+    /// EDNS0 parameters advertised by the client, if it sent an OPT record.
+    pub edns: Option<Edns>,
+}
+
+/// EDNS0 (RFC 6891) parameters extracted from a query's OPT pseudo-record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Edns {
+    /// The client's advertised UDP payload size.
+    pub udp_size: u16,
+    /// The EDNS version the client speaks.
+    pub version: u8,
 }
 
 /// Canonicalize a domain name: lowercase, single trailing-dot-free FQDN.
@@ -444,6 +458,9 @@ impl Record {
     pub fn encode(&self, buf: &mut Vec<u8>, class: u16) {
         buf.extend_from_slice(&encode_name(&self.name));
         buf.extend_from_slice(&self.rtype.to_be_bytes());
+        // For an OPT pseudo-record the CLASS field carries our advertised UDP
+        // payload size (RFC 6891) rather than an address class.
+        let class = if self.rtype == TYPE_OPT { EDNS_UDP_SIZE } else { class };
         buf.extend_from_slice(&class.to_be_bytes());
         buf.extend_from_slice(&self.ttl.to_be_bytes());
         let rdata = encode_rdata(self.rtype, &self.rdata);
@@ -481,36 +498,47 @@ pub fn decode_message(buf: &[u8]) -> Result<Message, &'static str> {
         msg.questions.push(Question { name, qtype, qclass });
     }
     for _ in 0..header.ancount {
-        msg.answers.push(read_record(&mut r)?);
+        let (rec, _class) = read_record(&mut r)?;
+        msg.answers.push(rec);
     }
     for _ in 0..header.nscount {
-        msg.authorities.push(read_record(&mut r)?);
+        let (rec, _class) = read_record(&mut r)?;
+        msg.authorities.push(rec);
     }
     for _ in 0..header.arcount {
-        msg.additionals.push(read_record(&mut r)?);
+        let (rec, class) = read_record(&mut r)?;
+        if rec.rtype == TYPE_OPT {
+            // OPT is a pseudo-record: its CLASS field is the advertised UDP
+            // payload size and its TTL field's upper bits hold the version.
+            msg.edns = Some(Edns {
+                udp_size: class,
+                version: ((rec.ttl >> 16) & 0xFF) as u8,
+            });
+        }
+        msg.additionals.push(rec);
     }
     Ok(msg)
 }
 
-fn read_record(r: &mut Reader) -> Result<Record, &'static str> {
+fn read_record(r: &mut Reader) -> Result<(Record, u16), &'static str> {
     let name = r.read_name()?;
     let rtype = r.read_u16().ok_or("truncated record")?;
-    let _class = r.read_u16().ok_or("truncated record")?;
+    let class = r.read_u16().ok_or("truncated record")?;
     let ttl = r.read_u32().ok_or("truncated record")?;
     let rdlen = r.read_u16().ok_or("truncated record")?;
     let rdata = r.read_rdata(rtype, rdlen)?;
-    Ok(Record { name, rtype, ttl, rdata })
+    Ok((Record { name, rtype, ttl, rdata }, class))
 }
 
 /// Build a response message for the given query, preserving the question and ID.
-pub fn build_response(query: &Message, answers: Vec<Record>, authorities: Vec<Record>, aa: bool, rcode: u16) -> Message {
+pub fn build_response(query: &Message, answers: Vec<Record>, authorities: Vec<Record>, aa: bool, ra: bool, rcode: u16) -> Message {
     let mut header = Header {
         id: query.header.id,
         qdcount: 1,
         ..Default::default()
     };
     header.set_qr(true);
-    header.set_ra(true);
+    header.set_ra(ra);
     header.set_rd(query.header.rd());
     header.set_aa(aa);
     header.set_rcode(rcode);
@@ -529,6 +557,17 @@ pub fn build_response(query: &Message, answers: Vec<Record>, authorities: Vec<Re
         answers,
         authorities,
         additionals: Vec::new(),
+        edns: query.edns,
+    }
+}
+
+/// Build a minimal EDNS0 OPT pseudo-record advertising our capabilities.
+pub fn make_opt() -> Record {
+    Record {
+        name: ".".to_string(),
+        rtype: TYPE_OPT,
+        ttl: 0, // extended-rcode 0, version 0, flags 0
+        rdata: RData::Raw(Vec::new()),
     }
 }
 
@@ -549,6 +588,73 @@ pub fn encode_message(msg: &Message) -> Vec<u8> {
         r.encode(&mut out, CLASS_IN);
     }
     out
+}
+
+impl Message {
+    /// Encode the message, truncating records so the result fits within `max`
+    /// bytes (RFC 1035 4.2.1). Sets the TC bit when anything was dropped.
+    pub fn encode_limited(&self, max: usize) -> Vec<u8> {
+        let max = max.max(12);
+        let mut out = Vec::new();
+        out.extend_from_slice(&[0u8; 12]);
+
+        let mut qd = 0usize;
+        for q in &self.questions {
+            let start = out.len();
+            q.encode(&mut out);
+            if out.len() > max {
+                out.truncate(start);
+                break;
+            }
+            qd += 1;
+        }
+
+        let mut tc = false;
+        let mut an = 0usize;
+        for r in &self.answers {
+            let start = out.len();
+            r.encode(&mut out, CLASS_IN);
+            if out.len() > max {
+                out.truncate(start);
+                tc = true;
+                break;
+            }
+            an += 1;
+        }
+        let mut ns = 0usize;
+        for r in &self.authorities {
+            let start = out.len();
+            r.encode(&mut out, CLASS_IN);
+            if out.len() > max {
+                out.truncate(start);
+                tc = true;
+                break;
+            }
+            ns += 1;
+        }
+        let mut ar = 0usize;
+        for r in &self.additionals {
+            let start = out.len();
+            r.encode(&mut out, CLASS_IN);
+            if out.len() > max {
+                out.truncate(start);
+                tc = true;
+                break;
+            }
+            ar += 1;
+        }
+
+        let mut header = self.header;
+        header.qdcount = qd as u16;
+        header.ancount = an as u16;
+        header.nscount = ns as u16;
+        header.arcount = ar as u16;
+        if tc {
+            header.set_tc(true);
+        }
+        out[..12].copy_from_slice(&header.encode());
+        out
+    }
 }
 
 #[cfg(test)]
@@ -611,5 +717,54 @@ mod tests {
         assert_eq!(type_from_str("aaaa"), Some(28));
         assert_eq!(type_from_str("TXT"), Some(16));
         assert_eq!(type_name(28), "AAAA");
+    }
+
+    #[test]
+    fn edns_opt_roundtrip() {
+        let mut m = Message::default();
+        m.header.id = 9;
+        m.header.qdcount = 1;
+        m.header.arcount = 1;
+        m.questions.push(Question {
+            name: "example.com".to_string(),
+            qtype: TYPE_A,
+            qclass: CLASS_IN,
+        });
+        m.additionals.push(make_opt());
+
+        let wire = encode_message(&m);
+        let decoded = decode_message(&wire).unwrap();
+        assert_eq!(decoded.edns.map(|e| e.udp_size), Some(EDNS_UDP_SIZE));
+        assert_eq!(decoded.edns.map(|e| e.version), Some(0));
+    }
+
+    #[test]
+    fn encode_limited_truncates_with_tc() {
+        let mut m = Message::default();
+        let mut h = Header::default();
+        h.id = 7;
+        h.set_qr(true);
+        h.ancount = 2;
+        m.header = h;
+        m.questions.push(Question {
+            name: "example.com".to_string(),
+            qtype: TYPE_A,
+            qclass: CLASS_IN,
+        });
+        for ip in [Ipv4Addr::new(1, 2, 3, 4), Ipv4Addr::new(5, 6, 7, 8)] {
+            m.answers.push(Record {
+                name: "example.com".to_string(),
+                rtype: TYPE_A,
+                ttl: 60,
+                rdata: RData::A(ip),
+            });
+        }
+        let full = encode_message(&m).len();
+        let limited = m.encode_limited(full - 20);
+        let decoded = decode_message(&limited).unwrap();
+        assert!(decoded.header.tc());
+        assert_eq!(decoded.header.ancount, 1);
+        assert_eq!(decoded.answers.len(), 1);
+        assert!(limited.len() <= full - 20);
     }
 }

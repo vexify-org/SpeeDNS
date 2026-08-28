@@ -99,22 +99,29 @@ impl Resolver {
         self.upstream
     }
 
-    /// Handle a raw DNS packet and produce the raw response packet.
+    /// Handle a raw DNS packet and produce the raw response packet for UDP,
+    /// honoring the client's EDNS0 buffer size and truncating with TC.
     pub fn handle_packet(&self, packet: &[u8]) -> Vec<u8> {
         let query = match decode_message(packet) {
             Ok(q) => q,
-            Err(_) => {
-                // Minimal FORMERR: echo the header if we can read it.
-                if packet.len() >= 2 {
-                    let mut h = Header::default();
-                    h.id = u16::from_be_bytes([packet[0], packet[1]]);
-                    h.set_qr(true);
-                    h.set_rcode(RCODE_FORMERR);
-                    let resp = Message { header: h, ..Default::default() };
-                    return encode_message(&resp);
-                }
-                return Vec::new();
-            }
+            Err(_) => return formerr(packet),
+        };
+        // Max UDP payload: 512 without EDNS, otherwise the client's advertised
+        // size clamped to a sane ceiling.
+        let max_payload = match query.edns {
+            Some(e) => (e.udp_size as usize).clamp(512, 4096),
+            None => 512,
+        };
+        let response = self.resolve(&query);
+        response.encode_limited(max_payload)
+    }
+
+    /// Handle a raw DNS packet over TCP, where responses may use the full
+    /// 64 KiB message size (RFC 1035 4.2.2).
+    pub fn handle_packet_tcp(&self, packet: &[u8]) -> Vec<u8> {
+        let query = match decode_message(packet) {
+            Ok(q) => q,
+            Err(_) => return formerr(packet),
         };
         let response = self.resolve(&query);
         encode_message(&response)
@@ -123,13 +130,13 @@ impl Resolver {
     /// Resolve a parsed query into a response message.
     pub fn resolve(&self, query: &Message) -> Message {
         let Some(q) = query.questions.first() else {
-            return build_response(query, vec![], vec![], false, RCODE_FORMERR);
+            return build_response(query, vec![], vec![], false, self.recursion_available(), RCODE_FORMERR);
         };
         if query.header.opcode() != 0 {
-            return build_response(query, vec![], vec![], false, RCODE_NOTIMP);
+            return build_response(query, vec![], vec![], false, self.recursion_available(), RCODE_NOTIMP);
         }
         if q.qclass != CLASS_IN {
-            return build_response(query, vec![], vec![], false, RCODE_REFUSED);
+            return build_response(query, vec![], vec![], false, self.recursion_available(), RCODE_REFUSED);
         }
 
         self.stats.queries.fetch_add(1, Ordering::Relaxed);
@@ -142,7 +149,24 @@ impl Resolver {
         } else {
             Vec::new()
         };
-        build_response(query, result.records, authorities, result.aa, result.rcode)
+        let mut response = build_response(
+            query,
+            result.records,
+            authorities,
+            result.aa,
+            self.recursion_available(),
+            result.rcode,
+        );
+        // Echo a minimal EDNS0 OPT when the client used EDNS (RFC 6891).
+        if query.edns.is_some() {
+            response.additionals.push(crate::dns::make_opt());
+        }
+        response
+    }
+
+    /// Whether this resolver can recurse on behalf of clients.
+    fn recursion_available(&self) -> bool {
+        self.upstream.is_some()
     }
 
     /// Resolve a name to a plain result (used by control / MCP tooling).
@@ -186,7 +210,9 @@ impl Resolver {
                 return ResolveResult { rcode: RCODE_NOERROR, records: answers, aa };
             }
             if self.store.read().unwrap().is_authoritative(&current) {
-                return ResolveResult { rcode: RCODE_NXDOMAIN, records: answers, aa };
+                // We own this zone but the name does not exist: authoritative
+                // NXDOMAIN (AA is set, matching what a real master answers).
+                return ResolveResult { rcode: RCODE_NXDOMAIN, records: answers, aa: true };
             }
 
             // 2. TTL cache.
@@ -300,6 +326,19 @@ impl Resolver {
     }
 }
 
+/// Minimal FORMERR response when a packet cannot be decoded at all.
+fn formerr(packet: &[u8]) -> Vec<u8> {
+    if packet.len() >= 2 {
+        let mut h = Header::default();
+        h.id = u16::from_be_bytes([packet[0], packet[1]]);
+        h.set_qr(true);
+        h.set_rcode(RCODE_FORMERR);
+        let resp = Message { header: h, ..Default::default() };
+        return encode_message(&resp);
+    }
+    Vec::new()
+}
+
 /// Render a resolved result for human/JSON consumption.
 pub fn records_to_json(records: &[Record]) -> crate::json::Json {
     let mut arr = crate::json::Json::arr();
@@ -383,5 +422,53 @@ mod tests {
         let r = Resolver::new(test_store(), 128, None, 500);
         let result = r.resolve_name("example.org", TYPE_A);
         assert_eq!(result.rcode, RCODE_REFUSED);
+    }
+
+    fn test_query(name: &str) -> Message {
+        Message {
+            header: Header { id: 1, qdcount: 1, ..Default::default() },
+            questions: vec![Question {
+                name: name.to_string(),
+                qtype: TYPE_A,
+                qclass: CLASS_IN,
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ra_flag_reflects_upstream() {
+        let query = test_query("example.com");
+        // With an upstream: recursion is available → RA set.
+        let rec = Resolver::new(
+            test_store(),
+            128,
+            Some("1.1.1.1:53".parse().unwrap()),
+            500,
+        );
+        assert!(rec.resolve(&query).header.ra());
+        // Authoritative-only: RA must be clear, AA set.
+        let auth = Resolver::new(test_store(), 128, None, 500);
+        let resp = auth.resolve(&query);
+        assert!(!resp.header.ra());
+        assert!(resp.header.aa());
+    }
+
+    #[test]
+    fn authoritative_nxdomain_has_aa() {
+        let r = Resolver::new(test_store(), 128, None, 500);
+        let result = r.resolve_name("nope.example.com", TYPE_A);
+        assert_eq!(result.rcode, RCODE_NXDOMAIN);
+        assert!(result.aa);
+    }
+
+    #[test]
+    fn edns_query_echoes_opt() {
+        let r = Resolver::new(test_store(), 128, None, 500);
+        let mut query = test_query("example.com");
+        query.edns = Some(crate::dns::Edns { udp_size: 4096, version: 0 });
+        let resp = r.resolve(&query);
+        assert_eq!(resp.additionals.len(), 1);
+        assert_eq!(resp.additionals[0].rtype, crate::dns::TYPE_OPT);
     }
 }

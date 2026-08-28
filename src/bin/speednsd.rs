@@ -219,7 +219,7 @@ fn handle_tcp(stream: std::net::TcpStream, resolver: &Resolver) -> Result<(), St
         if read_exact(&mut reader, &mut packet).is_err() {
             break;
         }
-        let response = resolver.handle_packet(&packet);
+        let response = resolver.handle_packet_tcp(&packet);
         let rlen = response.len().min(u16::MAX as usize);
         writer
             .write_all(&(rlen as u16).to_be_bytes())
