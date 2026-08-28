@@ -6,6 +6,7 @@
 
 use speedns::config::{load, CliArgs};
 use speedns::control::ControlServer;
+use speedns::http::WebServer;
 use speedns::resolver::Resolver;
 use speedns::store::Store;
 use speedns::{NAME, TAGLINE, VERSION};
@@ -32,6 +33,8 @@ OPTIONS:
         --ttl <n>             Default TTL for records without one (default 300)
     -s, --control-socket <p>  Unix control socket path (default /tmp/speedns.sock)
         --no-control          Disable the control socket
+        --web <addr>          Web dashboard listen (default 0.0.0.0:80)
+        --no-web              Disable the web dashboard
         --no-tcp              Disable the TCP listener
     -v, --verbose             Verbose logging
     -q, --quiet               Suppress non-error logging
@@ -99,6 +102,13 @@ fn run(cfg: speedns::config::Config) -> Result<(), String> {
         let control = ControlServer::new(resolver.clone(), sock_path)?;
         control.spawn()?;
         log(cfg.log_level, 1, &format!("control socket: {}", sock_path));
+    }
+
+    // ---- Web dashboard ------------------------------------------------------
+    if let Some(addr) = cfg.web_listen {
+        let web = WebServer::new(resolver.clone(), addr);
+        web.spawn()?;
+        log(cfg.log_level, 1, &format!("web dashboard: http://{}", addr));
     }
 
     // ---- UDP listener -------------------------------------------------------

@@ -19,6 +19,7 @@ pub mod cache;
 pub mod config;
 pub mod control;
 pub mod dns;
+pub mod http;
 pub mod json;
 pub mod mcp;
 pub mod resolver;

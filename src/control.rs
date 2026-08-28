@@ -106,7 +106,9 @@ fn err(msg: impl Into<String>) -> Json {
     j
 }
 
-fn dispatch(request: &Json, resolver: &Arc<Resolver>) -> Json {
+/// Route a JSON command to the right resolver operation. Shared by the Unix
+/// control socket, the MCP bridge and the web dashboard API.
+pub(crate) fn dispatch(request: &Json, resolver: &Arc<Resolver>) -> Json {
     let cmd = request
         .get("cmd")
         .and_then(|c| c.as_str())

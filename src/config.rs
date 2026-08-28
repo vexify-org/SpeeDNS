@@ -30,6 +30,8 @@ pub struct Config {
     pub timeout_ms: u64,
     /// Unix control socket path (optional).
     pub control_socket: Option<String>,
+    /// Web dashboard listen address (optional; `None` disables it).
+    pub web_listen: Option<SocketAddr>,
     /// Log verbosity: 0 = quiet, 1 = normal, 2 = verbose.
     pub log_level: u8,
 }
@@ -46,6 +48,7 @@ impl Default for Config {
             default_ttl: 300,
             timeout_ms: 1500,
             control_socket: Some("/tmp/speedns.sock".to_string()),
+            web_listen: Some("0.0.0.0:80".parse().unwrap()),
             log_level: 1,
         }
     }
@@ -90,6 +93,17 @@ impl Config {
                     .map_err(|_| format!("invalid timeout_ms '{}'", v))?;
             }
             "control_socket" => self.control_socket = optional_path(v),
+            "web" => {
+                let t = v.trim().trim_matches('"');
+                if t.is_empty() || t.eq_ignore_ascii_case("none") {
+                    self.web_listen = None;
+                } else {
+                    self.web_listen = Some(
+                        t.parse()
+                            .map_err(|_| format!("invalid web listen '{}'", t))?,
+                    );
+                }
+            }
             "log_level" => {
                 self.log_level = match v.to_ascii_lowercase().as_str() {
                     "quiet" | "error" | "0" => 0,
@@ -133,6 +147,7 @@ impl Config {
             ("cache_size", "SPEEDNS_CACHE_SIZE"),
             ("default_ttl", "SPEEDNS_TTL"),
             ("control_socket", "SPEEDNS_CONTROL_SOCKET"),
+            ("web", "SPEEDNS_WEB"),
         ] {
             if let Ok(val) = std::env::var(var) {
                 let _ = self.set(key, &val);
@@ -179,6 +194,8 @@ pub struct CliArgs {
     pub default_ttl: Option<u32>,
     pub control_socket: Option<String>,
     pub no_control: bool,
+    pub web: Option<String>,
+    pub no_web: bool,
     pub no_tcp: bool,
     pub tcp: bool,
     pub verbose: bool,
@@ -217,6 +234,8 @@ impl CliArgs {
                 }
                 "-s" | "--control-socket" => cli.control_socket = Some(take_value(a, &mut i)?),
                 "--no-control" => cli.no_control = true,
+                "--web" => cli.web = Some(take_value(a, &mut i)?),
+                "--no-web" => cli.no_web = true,
                 "--no-tcp" => cli.no_tcp = true,
                 "-t" | "--tcp" => cli.tcp = true,
                 "-v" | "--verbose" => cli.verbose = true,
@@ -257,6 +276,11 @@ impl CliArgs {
             cfg.control_socket = None;
         } else if let Some(v) = &self.control_socket {
             cfg.set("control_socket", v)?;
+        }
+        if self.no_web {
+            cfg.web_listen = None;
+        } else if let Some(v) = &self.web {
+            cfg.set("web", v)?;
         }
         if self.no_tcp {
             cfg.tcp = false;

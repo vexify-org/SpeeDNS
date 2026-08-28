@@ -59,6 +59,7 @@ SpeeDNS inverts that.
 | ⚡ **TTL cache** | Bounded LRU with natural TTL decay and negative caching (NXDOMAIN/SERVFAIL) |
 | 🌐 **UDP + TCP** | Full wire-protocol serving on 53, plus TCP for large/streamed answers |
 | 🛠️ **Control plane** | Unix-socket JSON API: add/remove records, flush cache, live stats |
+| 🖥️ **Web console** | Zero-dependency dashboard on `:80`: live stats, DNS query, add/remove records |
 | 📟 **dig-lite CLI** | `speedns resolve`, `reverse`, `records`, `add`, `rm`, `flush`, `status` |
 | 🪶 **Tiny binary** | ≈ 0.4–0.6 MB release binaries from ~3,900 lines of Rust |
 
@@ -176,6 +177,53 @@ echo '{"jsonrpc":"2.0","id":2,"method":"tools/call",
   | ./target/release/speedns-mcp 2>/dev/null
 ```
 
+## 🖥️ Web Console
+
+SpeeDNS ships a built-in zero-dependency web console — no Node, no nginx, no
+external assets. It serves a single dark-themed SPA at the root and a small
+JSON API under `/api/*`, all backed by the same control plane the CLI and MCP
+use.
+
+```bash
+# Default: bind 0.0.0.0:80 (needs root). Pick a port or disable as you like.
+./target/release/speednsd --listen 127.0.0.1:53 --records records.conf
+# → web dashboard: http://0.0.0.0:80
+
+# High port, no root required
+./target/release/speednsd --listen 127.0.0.1:53 --web 0.0.0.0:8080
+# → http://localhost:8080
+
+# Turn it off entirely
+./target/release/speednsd --no-web
+```
+
+What the console gives you:
+
+- **运行状态** — live telemetry: record count, cache entries, query counters,
+  upstream mode, uptime.
+- **DNS 查询** — resolve any name through the full pipeline (zone → cache →
+  upstream) with any record type.
+- **新增记录** — add authoritative records at runtime (A, AAAA, CNAME, MX, NS,
+  SOA, TXT, PTR, SRV).
+- **权威记录** — browse and delete every zone record with one click.
+- **清空缓存** — flush the TTL cache.
+
+JSON API (same semantics as the CLI/MCP control plane):
+
+```text
+GET  /api/status          live telemetry
+GET  /api/records?name=…  zone records
+GET  /api/query?name=..&type=..  live resolution
+POST /api/add             { "record": "app.example.com. 60 A 192.0.2.10" }
+POST /api/remove          { "name": …, "type": …, "value": … }
+POST /api/flush           clear the cache
+```
+
+> ⚠️ **Security:** by default the console binds `0.0.0.0:80` and exposes
+> read/write record management to anyone who can reach it. Bind it to localhost
+> (`--web 127.0.0.1:8080`), or restrict it behind your firewall/VPN when it must
+> be on a public interface.
+
 ## Configuration
 
 Config file (TOML-flavored), environment variables (`SPEEDNS_*`), and CLI flags,
@@ -192,6 +240,7 @@ cache_size = 2048
 default_ttl = 300
 timeout_ms = 1500
 control_socket = "/tmp/speedns.sock"
+web = "0.0.0.0:80"            # web console; "none" to disable
 log_level = "info"
 ```
 
